@@ -43,7 +43,12 @@ pub enum Node<'a> {
 	NibbledBranch(NibbleSlice<'a>, [Option<&'a [u8]>; nibble_ops::NIBBLE_LENGTH], Option<&'a [u8]>),
 }
 
-/// Type of node in the trie and essential information thereof.
+/// A `NodePlan` is a blueprint for decoding a node from a byte slice. The `NodePlan` is created
+/// by parsing an encoded node and can be reused multiple times. This is useful as a `Node` borrows
+/// from a byte slice and this struct does not.
+///
+/// The enum values mirror those of `Node` except that instead of byte slices, this struct stores
+/// ranges that can be used to index into a large byte slice.
 #[derive(Eq, PartialEq, Clone)]
 #[cfg_attr(feature = "std", derive(Debug))]
 pub enum NodePlan {
@@ -77,6 +82,10 @@ pub enum NodePlan {
 }
 
 impl NodePlan {
+	/// Build a node by decoding a byte slice according to the node plan. It is the responsibility
+	/// of the caller to ensure that the node plan was created for the argument data.
+	///
+	/// This may return None if the byte slice is not large enough.
 	pub fn build_node(self, data: &[u8]) -> Option<Node> {
 		let node = match self {
 			NodePlan::Empty => Node::Empty,
@@ -120,7 +129,8 @@ impl NodePlan {
 	}
 }
 
-/// An owning node type. Useful for trie iterators.
+/// An `OwnedNode` is an owned type from which a `Node` can be constructed which borrows data from
+/// the `OwnedNode`. This is useful for trie iterators.
 #[cfg_attr(feature = "std", derive(Debug))]
 #[derive(PartialEq, Eq)]
 pub struct OwnedNode<D: AsRef<[u8]>> {
@@ -129,11 +139,13 @@ pub struct OwnedNode<D: AsRef<[u8]>> {
 }
 
 impl<D: AsRef<[u8]>> OwnedNode<D> {
+	/// Construct an `OwnedNode` by decoding an owned data source according to some codec.
 	pub fn new<H: Hasher, C: NodeCodec<H>>(data: D) -> Result<Self, C::Error> {
 		let plan = C::decode_plan(data.as_ref())?;
 		Ok(OwnedNode { data, plan })
 	}
 
+	/// Construct a `Node` by borrowing data from this struct.
 	pub fn node(&self) -> Node {
 		self.plan.clone().build_node(self.data.as_ref())
 			.expect("plan is constructed on the same data so cannot reference out-of-range data; qed")
