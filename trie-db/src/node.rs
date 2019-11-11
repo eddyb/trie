@@ -26,6 +26,23 @@ use alloc::vec::Vec;
 /// Offset is applied on first byte of array (bytes are right aligned).
 pub type NodeKey = (usize, ElasticArray36<u8>);
 
+/// A reference to a trie node which may be stored within another trie node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeHandle<'a> {
+	Hash(&'a [u8]),
+	Inline(&'a [u8]),
+}
+
+/// Read a hash from a slice into a Hasher output. Returns None if the slice is the wrong length.
+pub fn decode_hash<H: Hasher>(data: &[u8]) -> Option<H::Out> {
+	if data.len() != H::LENGTH {
+		return None;
+	}
+	let mut hash = H::Out::default();
+	hash.as_mut().copy_from_slice(data);
+	Some(hash)
+}
+
 /// Type of node in the trie and essential information thereof.
 #[derive(Eq, PartialEq, Clone)]
 #[cfg_attr(feature = "std", derive(Debug))]
@@ -35,12 +52,35 @@ pub enum Node<'a> {
 	/// Leaf node; has key slice and value. Value may not be empty.
 	Leaf(NibbleSlice<'a>, &'a [u8]),
 	/// Extension node; has key slice and node data. Data may not be null.
-	Extension(NibbleSlice<'a>, &'a [u8]),
+	Extension(NibbleSlice<'a>, NodeHandle<'a>),
 	/// Branch node; has slice of child nodes (each possibly null)
 	/// and an optional immediate node data.
-	Branch([Option<&'a [u8]>; nibble_ops::NIBBLE_LENGTH], Option<&'a [u8]>),
+	Branch([Option<NodeHandle<'a>>; nibble_ops::NIBBLE_LENGTH], Option<&'a [u8]>),
 	/// Branch node with support for a nibble (when extension nodes are not used).
-	NibbledBranch(NibbleSlice<'a>, [Option<&'a [u8]>; nibble_ops::NIBBLE_LENGTH], Option<&'a [u8]>),
+	NibbledBranch(NibbleSlice<'a>, [Option<NodeHandle<'a>>; nibble_ops::NIBBLE_LENGTH], Option<&'a [u8]>),
+}
+
+/// A `NodeHandlePlan` is a decoding plan for constructing a `NodeHandle` from an encoded trie
+/// node. This is used as a substructure of `NodePlan`. See `NodePlan` for details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeHandlePlan {
+	Hash(Range<usize>),
+	Inline(Range<usize>),
+}
+
+impl NodeHandlePlan {
+	/// Build a node handle by decoding a byte slice according to the node handle plan. It is the
+	/// responsibility of the caller to ensure that the node plan was created for the argument
+	/// data.
+	///
+	/// This may return None if the byte slice is not large enough.
+	pub fn into_node_handle(self, data: &[u8]) -> Option<NodeHandle> {
+		let node_handle = match self {
+			NodeHandlePlan::Hash(range) => NodeHandle::Hash(data.get(range)?),
+			NodeHandlePlan::Inline(range) => NodeHandle::Inline(data.get(range)?),
+		};
+		Some(node_handle)
+	}
 }
 
 /// A `NodePlan` is a blueprint for decoding a node from a byte slice. The `NodePlan` is created
@@ -64,20 +104,20 @@ pub enum NodePlan {
 	Extension {
 		partial: Range<usize>,
 		partial_padding: usize,
-		child_data: Range<usize>,
+		child_data: NodeHandlePlan,
 	},
 	/// Branch node; has slice of child nodes (each possibly null)
 	/// and an optional immediate node data.
 	Branch {
 		value: Option<Range<usize>>,
-		children: [Option<Range<usize>>; nibble_ops::NIBBLE_LENGTH],
+		children: [Option<NodeHandlePlan>; nibble_ops::NIBBLE_LENGTH],
 	},
 	/// Branch node with support for a nibble (when extension nodes are not used).
 	NibbledBranch {
 		partial: Range<usize>,
 		partial_padding: usize,
 		value: Option<Range<usize>>,
-		children: [Option<Range<usize>>; nibble_ops::NIBBLE_LENGTH],
+		children: [Option<NodeHandlePlan>; nibble_ops::NIBBLE_LENGTH],
 	},
 }
 
@@ -95,34 +135,34 @@ impl NodePlan {
 			},
 			NodePlan::Extension { partial, partial_padding, child_data } => {
 				let partial_slice = NibbleSlice::new_offset(data.get(partial)?, partial_padding);
-				Node::Extension(partial_slice, data.get(child_data.clone())?)
+				Node::Extension(partial_slice, child_data.into_node_handle(data)?)
 			},
-			NodePlan::Branch { value, children } => {
-				let mut child_slices = [None; nibble_ops::NIBBLE_LENGTH];
+			NodePlan::Branch { value, children: child_plans } => {
+				let mut children = [None; nibble_ops::NIBBLE_LENGTH];
 				for i in 0..nibble_ops::NIBBLE_LENGTH {
-					if let Some(range) = children[i].clone() {
-						child_slices[i] = Some(data.get(range)?);
+					if let Some(ref child_plan) = child_plans[i] {
+						children[i] = child_plan.clone().into_node_handle(data);
 					}
 				}
 				let value_slice = match value {
 					Some(range) => Some(data.get(range)?),
 					None => None,
 				};
-				Node::Branch(child_slices, value_slice)
+				Node::Branch(children, value_slice)
 			},
-			NodePlan::NibbledBranch { partial, partial_padding, value, children } => {
+			NodePlan::NibbledBranch { partial, partial_padding, value, children: child_plans } => {
 				let partial_slice = NibbleSlice::new_offset(data.get(partial)?, partial_padding);
-				let mut child_slices = [None; nibble_ops::NIBBLE_LENGTH];
+				let mut children = [None; nibble_ops::NIBBLE_LENGTH];
 				for i in 0..nibble_ops::NIBBLE_LENGTH {
-					if let Some(range) = children[i].clone() {
-						child_slices[i] = Some(data.get(range)?);
+					if let Some(ref child_plan) = child_plans[i] {
+						children[i] = child_plan.clone().into_node_handle(data);
 					}
 				}
 				let value_slice = match value {
 					Some(range) => Some(data.get(range)?),
 					None => None,
 				};
-				Node::NibbledBranch(partial_slice, child_slices, value_slice)
+				Node::NibbledBranch(partial_slice, children, value_slice)
 			},
 		};
 		Some(node)

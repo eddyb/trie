@@ -15,7 +15,7 @@
 use super::{CError, DBValue, Result, Trie, TrieError, TrieHash, TrieIterator, TrieLayout};
 use hash_db::{Hasher, EMPTY_PREFIX};
 use triedb::TrieDB;
-use node::{Node, OwnedNode};
+use node::{Node, NodeHandle, OwnedNode};
 use nibble::{NibbleSlice, NibbleVec, nibble_ops};
 
 #[cfg(feature = "std")]
@@ -76,7 +76,11 @@ impl<'a, L: TrieLayout> TrieDBNodeIterator<'a, L> {
 			trail: Vec::with_capacity(8),
 			key_nibbles: NibbleVec::new(),
 		};
-		let (root_node, root_hash) = db.get_raw_or_lookup(db.root().as_ref(), EMPTY_PREFIX)?;
+		let (root_node, root_hash) = db.get_raw_or_lookup(
+			*db.root(),
+			NodeHandle::Hash(db.root().as_ref()),
+			EMPTY_PREFIX
+		)?;
 		r.descend(root_node, root_hash);
 		Ok(r)
 	}
@@ -122,7 +126,9 @@ impl<'a, L: TrieLayout> TrieDBNodeIterator<'a, L> {
 						self.key_nibbles.append_partial(slice.right());
 
 						let prefix = key.back(full_key_nibbles);
-						self.db.get_raw_or_lookup(item, prefix.left())?
+						self.db.get_raw_or_lookup(
+							node_hash.unwrap_or_default(), item, prefix.left()
+						)?
 					},
 					Node::Branch(nodes, _) => {
 						if partial.is_empty() {
@@ -138,7 +144,9 @@ impl<'a, L: TrieLayout> TrieDBNodeIterator<'a, L> {
 							partial = partial.mid(1);
 
 							let prefix = key.back(full_key_nibbles);
-							self.db.get_raw_or_lookup(child, prefix.left())?
+							self.db.get_raw_or_lookup(
+								node_hash.unwrap_or_default(), child, prefix.left()
+							)?
 						} else {
 							return Ok(())
 						}
@@ -170,7 +178,9 @@ impl<'a, L: TrieLayout> TrieDBNodeIterator<'a, L> {
 							partial = partial.mid(1);
 
 							let prefix = key.back(full_key_nibbles);
-							self.db.get_raw_or_lookup(child, prefix.left())?
+							self.db.get_raw_or_lookup(
+								node_hash.unwrap_or_default(), child, prefix.left()
+							)?
 						} else {
 							return Ok(())
 						}
@@ -239,7 +249,9 @@ impl<'a, L: TrieLayout> Iterator for TrieDBNodeIterator<'a, L> {
 					(Status::At, Node::Extension(partial, d)) => {
 						self.key_nibbles.append_partial(partial.right());
 						IterStep::Descend::<TrieHash<L>, CError<L>>(
-							self.db.get_raw_or_lookup(d, self.key_nibbles.as_prefix())
+							self.db.get_raw_or_lookup(
+								b.hash.unwrap_or_default(), d, self.key_nibbles.as_prefix()
+							)
 						)
 					},
 					(Status::At, Node::Branch(_, _)) => {
@@ -257,7 +269,9 @@ impl<'a, L: TrieLayout> Iterator for TrieDBNodeIterator<'a, L> {
 							self.key_nibbles.pop();
 							self.key_nibbles.push(i as u8);
 							IterStep::Descend::<TrieHash<L>, CError<L>>(
-								self.db.get_raw_or_lookup(child, self.key_nibbles.as_prefix())
+								self.db.get_raw_or_lookup(
+									b.hash.unwrap_or_default(), child, self.key_nibbles.as_prefix()
+								)
 							)
 						} else {
 							IterStep::Continue
